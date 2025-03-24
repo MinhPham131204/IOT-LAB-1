@@ -127,7 +127,7 @@ void setup() {
 
   sensorQueue = xQueueCreate(5, sizeof(SensorData));
   xTaskCreate(TaskSendData, "Send Data", 4096, NULL, 2, NULL);
-  xTaskCreate(TaskTemperature_Humidity, "LED Control", 4096, NULL, 1, NULL);
+  xTaskCreate(TaskTemperature_Humidity, "Read_Temp_Humi", 4096, NULL, 1, NULL);
 
 }
 
