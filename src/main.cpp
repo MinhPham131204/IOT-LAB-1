@@ -1,42 +1,68 @@
-#include <Arduino.h>
+#ifdef ESP8266
+#include <ESP8266WiFi.h>
+#else
+#ifdef ESP32
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#endif // ESP32
+#endif // ESP8266
+
+#include <Arduino.h>
 #include <DHT20.h>
-#include <ArduinoOTA.h>
-#include <PubSubClient.h>
 
 #include "Arduino_MQTT_Client.h"
 #include "Server_Side_RPC.h"
 #include "ThingsBoard.h"
 
-bool isFirmwareUpgradeTriggered = false;
-unsigned long lastSendTime = 0;
-const unsigned long interval = 2000;
+#define ENCRYPTED false
 
-const char* ssid = "ACLAB";
-const char* password = "ACLAB2023";
-const char* mqttServer = "app.coreiot.io";
-const int mqttPort = 1883;
-const char* mqttUsername = "mze9614291gw4wsthfrz";
-const char* mqttPassword = "";
-const char* otaTopic = "v1/devices/me/attributes";
 
-// MQTT client cho ThingsBoard
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
+constexpr char WIFI_SSID[] = "LAPTOP-U7SSM0OR 7033";
+constexpr char WIFI_PASSWORD[] = "12345678";
 
-Arduino_MQTT_Client MQTTClient(espClient);
+// See https://thingsboard.io/docs/getting-started-guides/helloworld/
+// to understand how to obtain an access token
+const char* TOKEN = "mze9614291gw4wsthfrz";
 
-// ThingsBoard và RPC setup
+// Thingsboard we want to establish a connection too
+const char* THINGSBOARD_SERVER = "app.coreiot.io";
+
+// // // MQTT port used to communicate with the server, 1883 is the default unencrypted MQTT port,
+// // // whereas 8883 would be the default encrypted SSL MQTT port
+#if ENCRYPTED
+const uint16_t THINGSBOARD_PORT = 8883;
+#else
+const uint16_t THINGSBOARD_PORT = 1883;
+#endif
+
 constexpr uint16_t MAX_MESSAGE_SEND_SIZE = 256U;
 constexpr uint16_t MAX_MESSAGE_RECEIVE_SIZE = 256U;
+
+constexpr const char RPC_JSON_METHOD[] = "example_json";
+constexpr const char RPC_TEMPERATURE_METHOD[] = "example_set_temperature";
+constexpr const char RPC_SWITCH_METHOD[] = "example_set_switch";
+constexpr const char RPC_TEMPERATURE_KEY[] = "temp";
+constexpr const char RPC_SWITCH_KEY[] = "switch";
 constexpr uint8_t MAX_RPC_SUBSCRIPTIONS = 3U;
 constexpr uint8_t MAX_RPC_RESPONSE = 5U;
 
-Server_Side_RPC<MAX_RPC_SUBSCRIPTIONS, MAX_RPC_RESPONSE> rpc;
-const std::array<IAPI_Implementation*, 1U> apis = { &rpc };
-ThingsBoard tb(MQTTClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, Default_Max_Stack_Size, apis);
 
-// DHT20 Sensor
+// Initialize underlying client, used to establish a connection
+#if ENCRYPTED
+WiFiClientSecure espClient;
+#else
+WiFiClient espClient;
+#endif
+// Initalize the Mqtt client instance
+Arduino_MQTT_Client mqttClient(espClient);
+// Initialize used apis
+Server_Side_RPC<MAX_RPC_SUBSCRIPTIONS, MAX_RPC_RESPONSE> rpc;
+const std::array<IAPI_Implementation*, 1U> apis = {
+    &rpc
+};
+// Initialize ThingsBoard instance with the maximum needed buffer size
+ThingsBoard tb(mqttClient, MAX_MESSAGE_RECEIVE_SIZE, MAX_MESSAGE_SEND_SIZE, Default_Max_Stack_Size, apis);
+
 DHT20 dht20;
 QueueHandle_t sensorQueue;
 
@@ -45,131 +71,66 @@ struct SensorData {
   double humidity;
 };
 
-void readTempAndHumi() {
-  dht20.read();
-  double temperature = dht20.getTemperature();
-  double humidity = dht20.getHumidity();
+void TaskTemperature_Humidity(void *pvParameters){
+  while(1){
+    dht20.read();
+    double temperature = dht20.getTemperature();
+    double humidity = dht20.getHumidity();
 
-  Serial.printf("Temp: %.2f °C | Humidity: %.2f %%\n", temperature, humidity);
+    Serial.print("Temp: "); Serial.print(temperature); Serial.print(" *C ");
+    Serial.print(" Humidity: "); Serial.print(humidity); Serial.print(" %");
+    Serial.println();
 
-  SensorData data = { temperature, humidity };
-  xQueueSend(sensorQueue, &data, portMAX_DELAY);
-
-  vTaskDelay(2000);
-}
-
-void sendData() {
-  SensorData data;
-  if (xQueueReceive(sensorQueue, &data, pdMS_TO_TICKS(1000)) == pdTRUE) {
-    tb.sendTelemetryData("temperature", data.temperature);
-    tb.sendTelemetryData("humidity", data.humidity);
-    Serial.printf("Sent -> Temp: %.2f°C, Humi: %.2f%%\n", data.temperature, data.humidity);
+    SensorData data = { temperature, humidity };
+    xQueueSend(sensorQueue, &data, portMAX_DELAY);
+    
+    vTaskDelay(2000);
   }
-  tb.loop();  // Duy trì kết nối MQTT
+
 }
 
-void connectToWiFi() {
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
-    vTaskDelay(pdMS_TO_TICKS(500));
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi Connected");
-}
-
-void connectToMQTT() {
-  mqttClient.setServer(mqttServer, mqttPort);
-  while (!mqttClient.connected()) {
-    Serial.println("Connecting to MQTT...");
-    if (mqttClient.connect("ESP32Client", mqttUsername, mqttPassword)) {
-      Serial.println("Connected to MQTT!");
-      mqttClient.subscribe(otaTopic);
-    } else {
-      Serial.print("Failed, rc=");
-      Serial.print(mqttClient.state());
-      Serial.println(" Retrying in 5 seconds...");
-      delay(5000);
+void TaskSendData(void *pvParameters) {
+  while(1) {
+    if (WiFi.status() != WL_CONNECTED) {
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      Serial.print("Connecting WiFi");
+      while (WiFi.status() != WL_CONNECTED) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        Serial.print(".");
+      }
+      Serial.println("\nWiFi Connected");
     }
-  }
-}
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  if (strcmp(topic, otaTopic) == 0) {
-    if (!isFirmwareUpgradeTriggered) {
-      isFirmwareUpgradeTriggered = true;
-      Serial.println("Firmware upgrade triggered!");
-      // OTA update sẽ được xử lý tự động trong loop()
-    }
-  }
-}
-
-void connectToThingsBoard() {
-  while (!tb.connected()) {
-    Serial.println("Connecting to ThingsBoard...");
-    if (tb.connect(mqttServer, mqttUsername, mqttPort)) {
+    if (!tb.connected()) {
+      Serial.println("Connecting ThingsBoard...");
+      if (!tb.connect(THINGSBOARD_SERVER, TOKEN, THINGSBOARD_PORT)) {
+        Serial.println("ThingsBoard connect failed");
+      }
       Serial.println("Connected to ThingsBoard!");
-    } else {
-      Serial.println("Failed to connect. Retrying in 5 seconds...");
-      delay(5000);
     }
+    SensorData data;
+    if (xQueueReceive(sensorQueue, &data, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      tb.sendTelemetryData("temperature", data.temperature);
+      tb.sendTelemetryData("humidity", data.humidity);
+      Serial.printf("Sent -> Temp: %.2f°C, Humi: %.2f%%\n", data.temperature, data.humidity);
+    }
+    tb.loop(); // giữ kết nối MQTT
   }
 }
+
 
 void setup() {
+  // put your setup code here, to run once:
   Serial.begin(115200);
   Wire.begin(21,22);
   dht20.begin();
-  connectToWiFi();
-  connectToMQTT();
-  mqttClient.setCallback(callback);
-
-  // Thiết lập OTA
-  ArduinoOTA.setPort(3232);
-  ArduinoOTA.setHostname("ESP32Device");
-
-  ArduinoOTA.onStart([]() {
-    Serial.println("OTA Update started...");
-  });
-
-  ArduinoOTA.onEnd([]() {
-    Serial.println("OTA Update completed!");
-    isFirmwareUpgradeTriggered = false;
-  });
-
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("OTA Progress: %u%%\r", (progress / (total / 100)));
-  });
-
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("OTA Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
-  });
-
-  ArduinoOTA.begin();
 
   sensorQueue = xQueueCreate(5, sizeof(SensorData));
-  dht20.begin();
+  xTaskCreate(TaskSendData, "Send Data", 4096, NULL, 2, NULL);
+  xTaskCreate(TaskTemperature_Humidity, "Read_Temp_Humi", 4096, NULL, 1, NULL);
+
 }
 
 void loop() {
-  if (!mqttClient.connected()) {
-    connectToMQTT();
-  }
 
-  mqttClient.loop();
-  ArduinoOTA.handle();
-  // unsigned long now = millis();
-
-  // if (now - lastSendTime >= interval) {
-  //   readTempAndHumi();
-  //   sendData();
-  //   lastSendTime = now;
-  // }
-
-  // tb.loop();
 }
